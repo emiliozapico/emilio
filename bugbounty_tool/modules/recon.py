@@ -148,24 +148,25 @@ def run_recon(
     target = network.normalize_target(target)
     progress = on_progress or (lambda msg: log.info(msg))
 
-    progress(f"resolving {target}")
-    ip = resolve(target)
+    host = network.host_only(target)
+    progress(f"resolving {host}")
+    ip = resolve(host)
     progress(f"ip = {ip or 'unresolved'}")
 
     whois_data: Dict = {}
     if with_whois:
         progress("running WHOIS")
-        whois_data = whois_lookup(target)
+        whois_data = whois_lookup(host)
 
     subdomains_crt: List[str] = []
     subdomains_wl: List[str] = []
     if with_subdomains:
         progress("querying crt.sh for subdomains")
-        subdomains_crt = enumerate_subdomains_crtsh(target)
+        subdomains_crt = enumerate_subdomains_crtsh(host)
         progress(f"crt.sh returned {len(subdomains_crt)} subdomains")
         progress("brute-forcing common subdomains")
         subdomains_wl = enumerate_subdomains_wordlist(
-            target, wordlist=subdomain_wordlist, on_progress=progress
+            host, wordlist=subdomain_wordlist, on_progress=progress
         )
 
     base_url = f"http://{target}"

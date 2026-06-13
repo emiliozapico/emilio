@@ -1,0 +1,38 @@
+{
+  "summary": "v1.1 retest: both critical bugs from iteration_2 are FIXED. (1) Motor 'Event loop is closed' on GET /api/bb/scans + DELETE /api/bb/scans/{id} no longer reproduces — sync pymongo persistence in bb_api._persist_sync works correctly. (2) normalize_target now preserves :port for both 'host:port' and 'http://host:port' forms — scan against http://127.0.0.1:9999 now produces the full set of expected findings. All 21 backend tests pass (5 new v1.2 regression + 6 v1.1 + 10 v1.0).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bb_api_v12_regression.py",
+    "/app/backend/tests/test_bb_api_v11.py",
+    "/app/backend/tests/test_bb_api.py",
+    "/app/test_reports/pytest/pytest_v12.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "bb_api._persist_sync: opens+closes a new pymongo MongoClient per scan; for high-volume use a module-level shared client with serverSelectionTimeoutMS would be more efficient. Acceptable for current scan rate.",
+    "JOBS dict is in-memory only; restarting backend wipes running/queued jobs. Persisted (completed) scans survive via bb_scans. Document or persist intermediate state if uptime resilience matters.",
+    "host_port() only recognises IPv4-style 'host:port'; IPv6 literals with explicit port ([::1]:9999) would fail the count(':')==1 check. Low risk for current targets but worth fixing.",
+    "/api/bb/scans handler still hits motor (db.bb_scans.find/...) inside the FastAPI loop, which is fine because the motor client was created on that loop. Persistence side now correctly uses pymongo from worker threads.",
+    "Code quality otherwise good: env-driven config, pydantic validation, proper HTTP codes, _id excluded from list/get responses."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bb_api_v12_regression.py"
+  ],
+  "success_rate": {
+    "backend": "21/21 (100%) — v1.0 10/10, v1.1 6/6, v1.2 regression 5/5"
+  },
+  "test_credentials": "N/A — vulnserver default admin/admin is exercised by default_creds scanner.",
+  "seed_data_creation": "Test runs created scan docs in db.bb_scans. Collection cleared at end of run (5 docs removed). Vulnserver started on 127.0.0.1:9999 for the test run and pkilled at the end.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend regression for v1.1 fixes is fully green. To re-run: `nohup python /app/bugbounty_tool/tests/vulnserver.py > /tmp/vuln.log 2>&1 &`, then `export REACT_APP_BACKEND_URL=$(grep REACT_APP_BACKEND_URL /app/frontend/.env | cut -d= -f2-)`, then `pytest /app/backend/tests/test_bb_api_v12_regression.py /app/backend/tests/test_bb_api_v11.py /app/backend/tests/test_bb_api.py -v`. The v1.2 file covers both fixed bugs explicitly (list/delete after completed scan + scheme-prefixed target with port).",
+  "rca of the issue": "iteration_2 bugs both verified fixed: (a) bb_api._run_job no longer calls asyncio.run() inside a worker thread — _persist_sync uses synchronous pymongo so motor's loop-bound selectors are never invalidated. GET /api/bb/scans and DELETE /api/bb/scans/{id} now return 200 after completed scans. (b) utils.network.normalize_target now keeps parsed.netloc (host:port) instead of stripping to hostname-only, and modules/scan.py extracts host_only + host_port to honour explicit ports. Both 'host:port' and 'http://host:port' inputs now scan correctly and yield the full required finding-type set including sqli, xss_reflected, command_injection, lfi, open_redirect, csrf_missing, insecure_cookie, dir_listing, dangerous_methods, git_exposure, backup_file, wp_user_enum."
+}

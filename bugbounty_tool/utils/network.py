@@ -91,10 +91,37 @@ def tcp_connect(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def normalize_target(target: str) -> str:
+    """Return ``host`` or ``host:port`` (strip scheme + path)."""
     if "://" in target:
         parsed = urlparse(target)
-        target = parsed.hostname or target
+        netloc = parsed.netloc or parsed.hostname or target
+        if "@" in netloc:
+            netloc = netloc.split("@", 1)[1]
+        target = netloc
     return target.strip().strip("/")
+
+
+def host_only(target: str) -> str:
+    """Strip any ``:port`` suffix and return the bare hostname/IP."""
+    target = normalize_target(target)
+    if target.startswith("["):
+        # IPv6 literal '[::1]:port'
+        end = target.find("]")
+        return target[: end + 1] if end > 0 else target
+    if target.count(":") == 1:
+        return target.split(":", 1)[0]
+    return target
+
+
+def host_port(target: str) -> Optional[int]:
+    """Extract the explicit port from a target if any, else ``None``."""
+    target = normalize_target(target)
+    if target.count(":") == 1:
+        try:
+            return int(target.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
 
 
 def build_base_url(host: str, port: int) -> str:

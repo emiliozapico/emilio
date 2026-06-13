@@ -66,9 +66,13 @@ def run_scan(
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict:
     target = network.normalize_target(target)
-    ip = network.resolve_host(target) or target
+    host = network.host_only(target)
+    explicit_port = network.host_port(target)
+    if explicit_port is not None and ports is None:
+        ports = [explicit_port]
+    ip = network.resolve_host(host) or host
     progress = on_progress or (lambda msg: log.info(msg))
-    progress(f"resolved {target} -> {ip}")
+    progress(f"resolved {host} -> {ip}")
     open_ports = scan_ports(ip, ctx, ports=ports, timeout=timeout, on_progress=progress)
     return {
         "target": target,

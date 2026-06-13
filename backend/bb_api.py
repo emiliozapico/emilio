@@ -1,7 +1,7 @@
 """FastAPI router that exposes the bugbounty_tool modules over HTTP."""
 from __future__ import annotations
 
-import asyncio
+import os
 import sys
 import threading
 import uuid
@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import MongoClient
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
 if str(TOOL_ROOT) not in sys.path:
@@ -116,9 +117,9 @@ def _run_job(job_id: str, payload: ScanRequest, db: AsyncIOMotorDatabase) -> Non
             JOBS[job_id]["status"] = "completed"
             JOBS[job_id]["finished_at"] = _now()
         try:
-            asyncio.run(_persist(db, JOBS[job_id]))
-        except Exception:
-            pass
+            _persist_sync(JOBS[job_id])
+        except Exception as exc:
+            progress(f"persist error (non-fatal): {exc}")
     except Exception as exc:  # noqa: BLE001
         with _JOBS_LOCK:
             JOBS[job_id]["status"] = "failed"
@@ -126,16 +127,27 @@ def _run_job(job_id: str, payload: ScanRequest, db: AsyncIOMotorDatabase) -> Non
             JOBS[job_id]["error"] = str(exc)
 
 
-async def _persist(db: AsyncIOMotorDatabase, job: Dict) -> None:
-    doc = {
-        "_id": job["id"], "id": job["id"],
-        "target": job["target"], "modules": job["modules"],
-        "status": job["status"], "created_at": job["created_at"],
-        "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
-        "result": job.get("result"), "error": job.get("error"),
-        "counts": (job.get("result") or {}).get("vuln", {}).get("counts"),
-    }
-    await db.bb_scans.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+def _persist_sync(job: Dict) -> None:
+    """Persist a finished job using synchronous pymongo to avoid leaking
+    event loops from worker threads (motor binds selectors to the loop)."""
+    mongo_url = os.environ.get("MONGO_URL")
+    db_name = os.environ.get("DB_NAME")
+    if not mongo_url or not db_name:
+        return
+    client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+    try:
+        col = client[db_name]["bb_scans"]
+        doc = {
+            "_id": job["id"], "id": job["id"],
+            "target": job["target"], "modules": job["modules"],
+            "status": job["status"], "created_at": job["created_at"],
+            "started_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+            "result": job.get("result"), "error": job.get("error"),
+            "counts": (job.get("result") or {}).get("vuln", {}).get("counts"),
+        }
+        col.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+    finally:
+        client.close()
 
 
 def build_router(db: AsyncIOMotorDatabase) -> APIRouter:
