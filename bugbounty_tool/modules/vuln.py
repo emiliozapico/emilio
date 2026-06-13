@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 from ..utils import network, parsers, helpers
 from ..utils.cve_db import get_cves_for_technology
+from ..utils.cvss import cvss_for_finding_type
 from ..utils.session import HttpContext
 from . import exploits as exploits_mod
 
@@ -116,6 +117,45 @@ def check_html_findings(html: str) -> List[Dict]:
     return findings
 
 
+def _enrich_finding(f: Dict, ctx: HttpContext) -> None:
+    """Mutates ``f`` in place to add CVSS info and a curl reproducer."""
+    # CVSS
+    cvss = cvss_for_finding_type(f.get("type") or "")
+    if cvss:
+        f["cvss"] = cvss
+        # Upgrade severity to the CVSS bucket if our hand-set one was lower
+        order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        cur = order.get((f.get("severity") or "").lower(), 0)
+        new = order.get(cvss["severity"], cur)
+        if new > cur:
+            f["severity"] = cvss["severity"]
+    # Curl reproducer
+    url = f.get("url")
+    if not url:
+        return
+    parts = ["curl -i -k"]
+    if ctx.cookies:
+        ck = "; ".join(f"{k}={v}" for k, v in ctx.cookies.items())
+        parts.append(f"-H 'Cookie: {ck}'")
+    for k, v in (ctx.headers or {}).items():
+        parts.append(f"-H '{k}: {v}'")
+    if (f.get("type") or "") == "cors_misconfig":
+        parts.append("-H 'Origin: https://evil.example.com'")
+    if (f.get("type") or "") == "dangerous_methods":
+        parts.insert(1, "-X OPTIONS")
+    if (f.get("type") or "") == "csrf_missing":
+        parts.insert(1, "-X POST")
+        parts.append("--data 'amount=10&to=alice'")
+    parts.append(f"'{url}'")
+    f["curl"] = " ".join(parts)
+
+
+def _enrich_findings(findings: List[Dict], ctx: HttpContext) -> List[Dict]:
+    for f in findings:
+        _enrich_finding(f, ctx)
+    return findings
+
+
 def _build_endpoints_from_recon(recon_result: Optional[Dict], base_url: str) -> Dict:
     """Build the endpoint bag used by the exploit module."""
     urls: List[str] = [base_url]
@@ -190,6 +230,9 @@ def run_vuln(
         base_url=base_url, endpoints=endpoints, ctx=ctx,
         on_progress=progress, enabled=enabled_exploits,
     ))
+
+    # Enrich every finding with CVSS + curl reproducer
+    _enrich_findings(findings, ctx)
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "unknown": 0}
     for f in findings:

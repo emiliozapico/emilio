@@ -29,6 +29,17 @@ JOBS: Dict[str, Dict] = {}
 _JOBS_LOCK = threading.Lock()
 
 
+class ReplayRequest(BaseModel):
+    method: str = "GET"
+    url: str
+    headers: Optional[Dict[str, str]] = None
+    cookies: Optional[Dict[str, str]] = None
+    body: Optional[str] = None
+    follow_redirects: bool = False
+    verify_tls: bool = False
+    timeout: int = 10
+
+
 class ScanRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=253)
     modules: List[str] = Field(default_factory=lambda: ["recon", "scan", "vuln"])
@@ -236,5 +247,43 @@ def build_router(db: AsyncIOMotorDatabase) -> APIRouter:
             JOBS.pop(job_id, None)
         await db.bb_scans.delete_one({"_id": job_id})
         return {"status": "deleted", "id": job_id}
+
+    @router.post("/replay")
+    async def replay(payload: ReplayRequest) -> Dict:
+        """Burp-style replay: re-send an editable HTTP request and return the raw response."""
+        import requests as _req
+        from urllib.parse import urlparse as _up
+        # Safety net: block obviously private RFC-style hostnames unless the caller
+        # explicitly opted-in via header? Skip for now — same trust model as the scanner.
+        if not payload.url or not payload.url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="url must start with http(s)://")
+        try:
+            import time
+            t0 = time.perf_counter()
+            resp = _req.request(
+                method=payload.method.upper(),
+                url=payload.url,
+                headers=payload.headers or None,
+                cookies=payload.cookies or None,
+                data=payload.body.encode() if payload.body else None,
+                allow_redirects=payload.follow_redirects,
+                verify=payload.verify_tls,
+                timeout=payload.timeout,
+            )
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            body = resp.text or ""
+            if len(body) > 200_000:
+                body = body[:200_000] + "\n…[truncated]"
+            return {
+                "status_code": resp.status_code,
+                "reason": resp.reason,
+                "url": resp.url,
+                "elapsed_ms": elapsed_ms,
+                "headers": dict(resp.headers),
+                "body": body,
+                "body_length": len(resp.content or b""),
+            }
+        except _req.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"replay failed: {exc}")
 
     return router

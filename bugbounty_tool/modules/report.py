@@ -97,6 +97,8 @@ def to_text(result: Dict) -> str:
         ) or "  No findings")
         for f in _sort_findings(vuln.get("findings", [])):
             lines.append(f"  [{f['severity'].upper():<8}] {f['title']}")
+            if f.get("cvss"):
+                lines.append(f"      cvss:      {f['cvss']['score']} ({f['cvss']['vector']})")
             if f.get("description"):
                 lines.append(f"      {f['description']}")
             if f.get("url"):
@@ -105,6 +107,8 @@ def to_text(result: Dict) -> str:
                 lines.append(f"      evidence:  {f['evidence']}")
             if f.get("reference"):
                 lines.append(f"      reference: {f['reference']}")
+            if f.get("curl"):
+                lines.append(f"      reproduce: {f['curl']}")
 
         lines.append("")
         lines.append("[RECOMMENDATIONS]")
@@ -183,6 +187,9 @@ def to_markdown(result: Dict) -> str:
         lines.append("")
         for f in _sort_findings(vuln.get("findings", [])):
             lines.append(f"### {f['severity'].upper()} — {f['title']}")
+            if f.get("cvss"):
+                lines.append("")
+                lines.append(f"**CVSS 3.1:** {f['cvss']['score']} ({f['cvss']['severity']}) — `{f['cvss']['vector']}`")
             if f.get("description"):
                 lines.append("")
                 lines.append(f["description"])
@@ -196,6 +203,11 @@ def to_markdown(result: Dict) -> str:
             if details:
                 lines.append("")
                 lines.extend(details)
+            if f.get("curl"):
+                lines.append("")
+                lines.append("```bash")
+                lines.append(f["curl"])
+                lines.append("```")
             lines.append("")
 
         lines.append("## Recommendations")

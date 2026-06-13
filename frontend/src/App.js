@@ -80,15 +80,25 @@ function Console({ progress }) {
   );
 }
 
-function Finding({ f }) {
+function Finding({ f, onReplay }) {
   const sev = (f.severity || "unknown").toLowerCase();
   return (
     <div className={`finding ${sev}`} data-testid={`finding-${f.type || "n"}`}>
       <div className="title">
         <h4>{f.title}</h4>
-        <span className={`sev-tag ${sev}`}>{sev}</span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {f.cvss && (
+            <span className="kbd" title={f.cvss.vector} data-testid="finding-cvss">
+              CVSS {f.cvss.score}
+            </span>
+          )}
+          <span className={`sev-tag ${sev}`}>{sev}</span>
+        </div>
       </div>
       {f.description && <div className="desc">{f.description}</div>}
+      {f.cvss?.vector && (
+        <div className="meta-row" style={{ color: "var(--fg-mute)" }}>vector: {f.cvss.vector}</div>
+      )}
       {f.url && (
         <div className="meta-row">URL: <a href={f.url} target="_blank" rel="noreferrer">{f.url}</a></div>
       )}
@@ -96,6 +106,27 @@ function Finding({ f }) {
       {f.reference && (
         <div className="meta-row">
           reference: <a href={f.reference} target="_blank" rel="noreferrer">{f.reference}</a>
+        </div>
+      )}
+      {f.curl && (
+        <div className="meta-row" style={{ marginTop: 6 }}>
+          <code style={{ color: "var(--accent)", wordBreak: "break-all" }}>{f.curl}</code>
+        </div>
+      )}
+      {f.url && onReplay && (
+        <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            className="pill"
+            onClick={() => onReplay(f)}
+            data-testid={`btn-replay-${f.type}`}
+          >▸ replay in console</button>
+          <button
+            type="button"
+            className="pill"
+            onClick={() => navigator.clipboard?.writeText(f.curl || f.url)}
+            data-testid={`btn-copy-${f.type}`}
+          >copy curl</button>
         </div>
       )}
     </div>
@@ -202,7 +233,7 @@ function ScanView({ scan }) {
   );
 }
 
-function VulnView({ vuln }) {
+function VulnView({ vuln, onReplay }) {
   if (!vuln) return <div className="empty">Vuln module was not run.</div>;
   const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4, unknown: 5 };
   const sorted = [...(vuln.findings || [])].sort(
@@ -211,7 +242,159 @@ function VulnView({ vuln }) {
   if (!sorted.length) return <div className="empty">No findings.</div>;
   return (
     <div className="findings" data-testid="vuln-view">
-      {sorted.map((f, i) => <Finding key={i} f={f} />)}
+      {sorted.map((f, i) => <Finding key={i} f={f} onReplay={onReplay} />)}
+    </div>
+  );
+}
+
+function ReplayView({ initialUrl, initialCurl }) {
+  const [method, setMethod] = useState("GET");
+  const [url, setUrl] = useState(initialUrl || "");
+  const [headersStr, setHeadersStr] = useState("");
+  const [cookiesStr, setCookiesStr] = useState("");
+  const [body, setBody] = useState("");
+  const [followRedirects, setFollowRedirects] = useState(false);
+  const [response, setResponse] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (initialUrl) setUrl(initialUrl);
+    if (initialCurl) {
+      const m = initialCurl.match(/-X\s+(\w+)/);
+      if (m) setMethod(m[1]);
+    }
+  }, [initialUrl, initialCurl]);
+
+  const send = async () => {
+    setLoading(true);
+    setResponse(null);
+    const headers = {};
+    headersStr.split("\n").forEach(l => {
+      const i = l.indexOf(":");
+      if (i > 0) headers[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+    });
+    const cookies = {};
+    cookiesStr.split(";").forEach(p => {
+      const i = p.indexOf("=");
+      if (i > 0) cookies[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+    });
+    try {
+      const r = await axios.post(`${API}/replay`, {
+        method, url,
+        headers: Object.keys(headers).length ? headers : undefined,
+        cookies: Object.keys(cookies).length ? cookies : undefined,
+        body: body || undefined,
+        follow_redirects: followRedirects,
+      });
+      setResponse(r.data);
+    } catch (e) {
+      setResponse({ error: e?.response?.data?.detail || e.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div data-testid="replay-view">
+      <div style={{ display: "grid", gridTemplateColumns: "100px 1fr auto", gap: 8, marginBottom: 10 }}>
+        <select
+          value={method} onChange={(e) => setMethod(e.target.value)}
+          data-testid="replay-method"
+          style={{
+            background: "var(--bg)", color: "var(--fg)",
+            border: "1px solid var(--border)", borderRadius: 6,
+            padding: "10px 12px", fontFamily: "JetBrains Mono, monospace", fontSize: 13,
+          }}
+        >
+          {["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"].map(m => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <input
+          type="text" value={url} onChange={(e) => setUrl(e.target.value)}
+          placeholder="http://target/path?param=value"
+          data-testid="replay-url"
+          style={{
+            width: "100%", background: "var(--bg)", color: "var(--fg)",
+            border: "1px solid var(--border)", borderRadius: 6,
+            padding: "10px 12px", fontFamily: "JetBrains Mono, monospace", fontSize: 13,
+          }}
+        />
+        <button
+          className="btn" style={{ width: "auto", padding: "10px 20px" }}
+          onClick={send} disabled={loading || !url}
+          data-testid="btn-replay-send"
+        >{loading ? "…" : "send"}</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div>
+          <label style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 11, color: "var(--fg-mute)", textTransform: "uppercase" }}>headers (one per line)</label>
+          <textarea
+            rows={3} value={headersStr}
+            onChange={(e) => setHeadersStr(e.target.value)}
+            placeholder="X-Test: 1"
+            data-testid="replay-headers"
+            style={{
+              width: "100%", background: "var(--bg)", color: "var(--fg)",
+              border: "1px solid var(--border)", borderRadius: 6, padding: "8px",
+              fontFamily: "JetBrains Mono, monospace", fontSize: 12, marginTop: 4,
+            }}
+          />
+        </div>
+        <div>
+          <label style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 11, color: "var(--fg-mute)", textTransform: "uppercase" }}>cookies (a=b; c=d)</label>
+          <textarea
+            rows={3} value={cookiesStr}
+            onChange={(e) => setCookiesStr(e.target.value)}
+            placeholder="PHPSESSID=abc"
+            data-testid="replay-cookies"
+            style={{
+              width: "100%", background: "var(--bg)", color: "var(--fg)",
+              border: "1px solid var(--border)", borderRadius: 6, padding: "8px",
+              fontFamily: "JetBrains Mono, monospace", fontSize: 12, marginTop: 4,
+            }}
+          />
+        </div>
+      </div>
+
+      <div className="field">
+        <label>body (raw)</label>
+        <textarea
+          rows={3} value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="param1=value1&param2=value2"
+          data-testid="replay-body"
+        />
+      </div>
+
+      <label className="checkbox-row">
+        <input type="checkbox" checked={followRedirects}
+               onChange={(e) => setFollowRedirects(e.target.checked)}
+               data-testid="replay-follow" />
+        follow redirects
+      </label>
+
+      {response && (
+        <div data-testid="replay-response" style={{ marginTop: 10 }}>
+          <div className="mono" style={{ fontSize: 12, color: "var(--fg-dim)", marginBottom: 6 }}>
+            {response.error
+              ? <span style={{ color: "var(--danger)" }}>error: {response.error}</span>
+              : <>HTTP <strong style={{ color: response.status_code < 400 ? "var(--ok)" : "var(--warn)" }}>{response.status_code}</strong> {response.reason} · {response.elapsed_ms}ms · {response.body_length} bytes</>}
+          </div>
+          {!response.error && (
+            <>
+              <div className="report-pre" style={{ maxHeight: 140 }}>
+                {Object.entries(response.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n")}
+              </div>
+              <div style={{ height: 8 }} />
+              <div className="report-pre" style={{ maxHeight: 320 }}>
+                {response.body || "(empty body)"}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -293,8 +476,18 @@ export default function App() {
   const [loginUrl, setLoginUrl] = useState("");
   const [loginUser, setLoginUser] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [exploitsList, setExploitsList] = useState([]); // empty = all
+  const [exploitsList, setExploitsList] = useState([]);
   const [allExploits, setAllExploits] = useState([]);
+
+  // Replay
+  const [replayUrl, setReplayUrl] = useState("");
+  const [replayCurl, setReplayCurl] = useState("");
+
+  const sendToReplay = (f) => {
+    setReplayUrl(f.url || "");
+    setReplayCurl(f.curl || "");
+    setTab("replay");
+  };
 
   // Load scan history
   const loadHistory = async () => {
@@ -415,7 +608,7 @@ export default function App() {
           <div className="brand-mark">BB</div>
           <div>
             <div className="brand-title">
-              bug-bounty-toolkit <span className="dim">// v1.1</span>
+              bug-bounty-toolkit <span className="dim">// v1.2</span>
             </div>
             <div className="mono" style={{ fontSize: 11, color: "var(--fg-mute)", letterSpacing: "0.08em" }}>
               {headerStatus}
@@ -619,7 +812,7 @@ export default function App() {
           <SummaryStats counts={counts} />
 
           <div className="tabs" data-testid="tabs">
-            {["console", "recon", "scan", "vuln", "report"].map((t) => (
+            {["console", "recon", "scan", "vuln", "replay", "report"].map((t) => (
               <button
                 key={t}
                 type="button"
@@ -630,7 +823,7 @@ export default function App() {
             ))}
           </div>
 
-          {!activeJob && (
+          {!activeJob && tab !== "replay" && (
             <div className="empty" data-testid="no-active-job">
               Run a scan to see live results here.
             </div>
@@ -639,7 +832,8 @@ export default function App() {
           {activeJob && tab === "console" && <Console progress={activeJob.progress || []} />}
           {activeJob && tab === "recon" && <ReconView recon={activeJob.result?.recon} />}
           {activeJob && tab === "scan" && <ScanView scan={activeJob.result?.scan} />}
-          {activeJob && tab === "vuln" && <VulnView vuln={activeJob.result?.vuln} />}
+          {activeJob && tab === "vuln" && <VulnView vuln={activeJob.result?.vuln} onReplay={sendToReplay} />}
+          {tab === "replay" && <ReplayView initialUrl={replayUrl} initialCurl={replayCurl} />}
           {activeJob && tab === "report" && (
             activeJob.status === "completed"
               ? <ReportView jobId={activeJob.id} />
