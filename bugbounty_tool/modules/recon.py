@@ -4,26 +4,19 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional
 
 from ..utils import network, parsers, wordlists, helpers
+from ..utils.session import HttpContext
 
 log = helpers.get_logger()
 
 
-# ---------------------------------------------------------------------------
-# WHOIS + DNS
-# ---------------------------------------------------------------------------
-
 def whois_lookup(domain: str) -> Dict:
-    """Return a small subset of the WHOIS record for ``domain``.
-
-    Failures are swallowed: WHOIS is optional and frequently rate-limited.
-    """
     try:
-        import whois  # python-whois
+        import whois
     except ImportError:
         return {"error": "python-whois not installed"}
     try:
         record = whois.whois(domain)
-    except Exception as exc:  # noqa: BLE001 - WHOIS lib raises generic exceptions
+    except Exception as exc:  # noqa: BLE001
         return {"error": f"whois failed: {exc}"}
 
     def _first(value):
@@ -42,18 +35,12 @@ def whois_lookup(domain: str) -> Dict:
 
 
 def resolve(domain: str) -> Optional[str]:
-    """Resolve ``domain`` to a single IPv4 (or ``None``)."""
     return network.resolve_host(domain)
 
 
-# ---------------------------------------------------------------------------
-# Subdomain enumeration
-# ---------------------------------------------------------------------------
-
 def enumerate_subdomains_crtsh(domain: str, timeout: int = 20) -> List[str]:
-    """Query https://crt.sh certificate transparency logs."""
     url = f"https://crt.sh/?q=%25.{domain}&output=json"
-    resp = network.safe_get(url, timeout=timeout)
+    resp = network.safe_get(url, timeout=timeout, retries=1)
     if not resp or resp.status_code != 200:
         return []
     try:
@@ -73,10 +60,8 @@ def enumerate_subdomains_crtsh(domain: str, timeout: int = 20) -> List[str]:
 def enumerate_subdomains_wordlist(
     domain: str,
     wordlist: Optional[List[str]] = None,
-    timeout: float = 2.0,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> List[str]:
-    """Resolve ``<word>.<domain>`` for each entry; return ones that resolve."""
     words = wordlist if wordlist else wordlists.DEFAULT_SUBDOMAINS
     alive: List[str] = []
     for word in words:
@@ -89,12 +74,8 @@ def enumerate_subdomains_wordlist(
     return alive
 
 
-# ---------------------------------------------------------------------------
-# Tech detection (fetch + parse)
-# ---------------------------------------------------------------------------
-
-def fetch_target(url: str, timeout: int = 10) -> Optional[Dict]:
-    resp = network.safe_get(url, timeout=timeout)
+def fetch_target(url: str, ctx: HttpContext) -> Optional[Dict]:
+    resp = network.safe_get(url, ctx=ctx, retries=1)
     if resp is None:
         return None
     return {
@@ -105,8 +86,8 @@ def fetch_target(url: str, timeout: int = 10) -> Optional[Dict]:
     }
 
 
-def detect_technologies(url: str, timeout: int = 10) -> Dict:
-    fetched = fetch_target(url, timeout=timeout)
+def detect_technologies(url: str, ctx: HttpContext) -> Dict:
+    fetched = fetch_target(url, ctx)
     if not fetched:
         return {"url": url, "ok": False, "technologies": [], "headers": {}}
     techs = parsers.detect_technologies(fetched["headers"], fetched["html"])
@@ -119,15 +100,10 @@ def detect_technologies(url: str, timeout: int = 10) -> Dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Directory enumeration
-# ---------------------------------------------------------------------------
-
 def enumerate_directories(
     base_url: str,
+    ctx: HttpContext,
     wordlist: Optional[List[str]] = None,
-    timeout: int = 6,
-    delay: float = 0.0,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> List[Dict]:
     words = wordlist if wordlist else wordlists.DEFAULT_DIRS
@@ -135,14 +111,7 @@ def enumerate_directories(
     base_url = base_url.rstrip("/")
     for word in words:
         url = f"{base_url}/{word}"
-        resp = network.safe_get(
-            url,
-            timeout=timeout,
-            retries=0,
-            delay=delay,
-            allow_redirects=False,
-            verify=False,
-        )
+        resp = network.safe_get(url, ctx=ctx, retries=0, allow_redirects=False)
         if resp is None:
             continue
         if resp.status_code in (200, 201, 204, 301, 302, 401, 403):
@@ -156,12 +125,8 @@ def enumerate_directories(
     return findings
 
 
-# ---------------------------------------------------------------------------
-# Param + form discovery
-# ---------------------------------------------------------------------------
-
-def discover_inputs(url: str, timeout: int = 10) -> Dict:
-    fetched = fetch_target(url, timeout=timeout)
+def discover_inputs(url: str, ctx: HttpContext) -> Dict:
+    fetched = fetch_target(url, ctx)
     if not fetched:
         return {"forms": [], "url_params": []}
     return {
@@ -170,19 +135,14 @@ def discover_inputs(url: str, timeout: int = 10) -> Dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# High level orchestration
-# ---------------------------------------------------------------------------
-
 def run_recon(
     target: str,
+    ctx: HttpContext,
     *,
     with_whois: bool = True,
     with_subdomains: bool = True,
     subdomain_wordlist: Optional[List[str]] = None,
     dir_wordlist: Optional[List[str]] = None,
-    timeout: int = 10,
-    delay: float = 0.0,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict:
     target = network.normalize_target(target)
@@ -210,23 +170,17 @@ def run_recon(
 
     base_url = f"http://{target}"
     progress(f"detecting technologies on {base_url}")
-    tech = detect_technologies(base_url, timeout=timeout)
+    tech = detect_technologies(base_url, ctx)
     if not tech.get("ok"):
         base_url = f"https://{target}"
         progress(f"http failed, trying {base_url}")
-        tech = detect_technologies(base_url, timeout=timeout)
+        tech = detect_technologies(base_url, ctx)
 
     progress("enumerating common directories")
-    dirs = enumerate_directories(
-        base_url,
-        wordlist=dir_wordlist,
-        timeout=timeout,
-        delay=delay,
-        on_progress=progress,
-    )
+    dirs = enumerate_directories(base_url, ctx, wordlist=dir_wordlist, on_progress=progress)
 
     progress("discovering forms and URL parameters")
-    inputs = discover_inputs(base_url, timeout=timeout)
+    inputs = discover_inputs(base_url, ctx)
 
     all_subdomains = sorted(set(subdomains_crt) | set(subdomains_wl))
 

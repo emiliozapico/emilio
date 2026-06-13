@@ -1,0 +1,48 @@
+{
+  "summary": "v1.1 active-exploit scanners verified end-to-end. Backend exploits endpoint, validation of new fields (cookies/headers/crawl_depth/login_*/enabled_exploits), and full vuln scan against /app/bugbounty_tool/tests/vulnserver.py on 127.0.0.1:9999 all pass. CLI vuln scan finds sqli_error, xss_reflected, command_injection as required. UI v1.1 brand, advanced panel, all 6 new inputs, 15 exploit pills, and POST /api/bb/scans with cookies+exploit-pill-sqli all functional. Two pre-existing v1.0 backend tests now fail with motor 'Event loop is closed' 500s on /api/bb/scans (list) and DELETE /api/bb/scans/{id} — a known issue carried over from v1.0 that the previous iteration flagged in code-review but did not fix.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/bb/scans, DELETE /api/bb/scans/{id}", "issue": "Motor RuntimeError: 'Event loop is closed' — bb_api.py uses asyncio.run(_persist(...)) inside a worker thread which closes the loop. Subsequent motor calls from FastAPI handlers crash with 500. Reproduces 100% after at least one completed scan. UI History panel shows 'No scans yet.' because of this. Fix: use a single shared loop / loop.call_soon_threadsafe / asyncio.run_coroutine_threadsafe(), or a sync pymongo client for persistence.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/bb/scans", "issue": "Target 'http://127.0.0.1:9999' is normalized via urlparse().hostname which drops the port, yielding base_url 'http://127.0.0.1' and a crawl with zero forms/params/findings. Workaround: pass the target as 'host:port' (no scheme). Fix in utils/network.normalize_target: keep netloc (hostname:port) instead of only hostname."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "History panel listing", "issue": "GET /api/bb/scans returns 500 due to backend motor bug; UI silently shows 'No scans yet.' even after a successful POST. No client-side error toast.", "affected_selectors": ["[data-testid^='history-item-']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_bb_api_v11.py",
+    "/app/test_reports/pytest/pytest_v11.xml"
+  ],
+  "action_items": [
+    "FIX backend motor event-loop-closed bug in /app/backend/bb_api.py: replace asyncio.run(_persist(...)) in _run_job with a thread-safe submission to the FastAPI main loop, or persist via pymongo (sync) instead of motor.",
+    "FIX /app/bugbounty_tool/utils/network.py normalize_target to preserve port: use parsed.netloc (or hostname+':'+port) so users can pass 'http://host:port' URLs.",
+    "OPTIONAL: surface backend 500s as an error toast in the History panel."
+  ],
+  "critical_code_review_comments": [
+    "bb_api._run_job → asyncio.run(_persist(db,...)) per scan: creates and immediately closes an event loop each time, while motor caches selectors keyed to the event loop, producing 'Event loop is closed' on the next async motor call from any handler. This is the root cause of the 500s on /api/bb/scans and DELETE.",
+    "utils.network.normalize_target strips the port: urlparse('http://127.0.0.1:9999').hostname == '127.0.0.1'. base_url is then rebuilt without a port. Either keep parsed.netloc or do not strip the port from the input string.",
+    "exploits.test_default_credentials always sends one baseline POST + 9 credential POSTs per detected login form, regardless of `enabled_exploits` ordering — acceptable but worth rate-limiting on real targets.",
+    "exploits.run_exploits sets `enabled = set(enabled or ALL_EXPLOITS)` AFTER ALL_EXPLOITS is referenced in bb_api; ALL_EXPLOITS list is defined at the BOTTOM of /app/bugbounty_tool/modules/exploits.py (line ~777). Because Python evaluates the module top-down, the import works, but readers expect ALL_EXPLOITS at the top of the file — consider moving it.",
+    "Frontend does not display backend 500 errors from /api/bb/scans listing — silent failure."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_bb_api_v11.py"
+  ],
+  "success_rate": {
+    "backend": "v1.1 suite 6/6 (100%); combined v1.0+v1.1 14/16 (87.5%) due to 2 motor-related 500s",
+    "frontend": "100% (brand, advanced panel, all 6 inputs, 15 exploit pills, POST success)",
+    "cli": "100% (sqli_error + xss_reflected + command_injection all returned)"
+  },
+  "test_credentials": "N/A — vulnserver default admin/admin is exercised by default_creds scanner.",
+  "seed_data_creation": "Multiple scan jobs persisted to db.bb_scans during testing against 127.0.0.1:9999 and example.com. The DELETE /api/bb/scans cleanup is currently broken due to the motor bug, so main agent may want to drop db.bb_scans manually.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "ALWAYS start vulnserver before backend tests: `nohup python /app/bugbounty_tool/tests/vulnserver.py > /tmp/vuln.log 2>&1 &` then sleep 2, then curl 127.0.0.1:9999 to confirm. ALWAYS use target string without scheme ('127.0.0.1:9999', not 'http://127.0.0.1:9999') until normalize_target is fixed. The v1.1 pytest file is /app/backend/tests/test_bb_api_v11.py. UI new testids confirmed: btn-toggle-advanced, advanced-panel, input-crawl-depth, input-crawl-pages, input-cookies, input-headers, input-login-url, input-login-user, input-login-password, exploit-pill-{sqli,xss,cmdi,lfi,open_redirect,crlf,csrf,default_creds,cookies,cors,dir_listing,methods,git,backups,wordpress}.",
+  "rca of the issue": "1) HISTORY 500: motor's AsyncIOMotorClient binds its selector to the running event loop. bb_api._run_job is called from a worker thread, and it executes `asyncio.run(_persist(...))` which spins up and tears down a fresh loop each call. Once that loop closes, the cached motor selector references a dead loop, so the next handler call (GET/DELETE /api/bb/scans) raises RuntimeError('Event loop is closed') and FastAPI returns 500. Mitigation: capture the FastAPI startup loop and use `asyncio.run_coroutine_threadsafe(_persist(db, job), main_loop)` from the worker thread, OR use a synchronous pymongo client for persistence. 2) CRAWL ZERO-PARAMS: normalize_target drops port via urlparse.hostname; fix by returning parsed.netloc (e.g. '127.0.0.1:9999') when scheme is present."
+}

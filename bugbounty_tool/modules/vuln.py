@@ -1,11 +1,13 @@
-"""Vulnerability heuristics built on top of the recon + scan outputs."""
+"""Vulnerability heuristics: passive checks (CVEs, headers, exposed files,
+comments) plus the full active exploit battery from :mod:`exploits`."""
 from __future__ import annotations
 
-import time
 from typing import Callable, Dict, List, Optional
 
 from ..utils import network, parsers, helpers
 from ..utils.cve_db import get_cves_for_technology
+from ..utils.session import HttpContext
+from . import exploits as exploits_mod
 
 log = helpers.get_logger()
 
@@ -74,16 +76,14 @@ def check_security_headers(headers: Dict[str, str]) -> List[Dict]:
 
 def check_exposed_files(
     base_url: str,
-    timeout: int = 6,
-    delay: float = 0.0,
+    ctx: HttpContext,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> List[Dict]:
     findings: List[Dict] = []
     base_url = base_url.rstrip("/")
     for path in EXPOSED_FILES:
         url = f"{base_url}/{path}"
-        resp = network.safe_get(url, timeout=timeout, retries=0,
-                                allow_redirects=False, verify=False, delay=delay)
+        resp = network.safe_get(url, ctx=ctx, retries=0, allow_redirects=False)
         if resp is None:
             continue
         if resp.status_code == 200 and len(resp.content) > 0:
@@ -116,70 +116,26 @@ def check_html_findings(html: str) -> List[Dict]:
     return findings
 
 
-def bruteforce_login(
-    login_url: str,
-    usernames: List[str],
-    passwords: List[str],
-    username_field: str = "username",
-    password_field: str = "password",
-    timeout: int = 6,
-    delay: float = 2.0,
-    max_attempts: int = 5,
-    on_progress: Optional[Callable[[str], None]] = None,
-) -> List[Dict]:
-    """Heavily rate-limited demonstration brute-force.
-
-    Stops after ``max_attempts`` total requests to guarantee we do not flood
-    the target. Intended only for explicit authorized labs (DVWA, etc.).
-    """
-    import requests
-    findings: List[Dict] = []
-    attempts = 0
-    baseline = None
-    progress = on_progress or (lambda m: log.info(m))
-    for user in usernames:
-        for pwd in passwords:
-            if attempts >= max_attempts:
-                progress("brute-force capped at max_attempts")
-                return findings
-            attempts += 1
-            try:
-                resp = requests.post(
-                    login_url,
-                    data={username_field: user, password_field: pwd},
-                    timeout=timeout,
-                    allow_redirects=False,
-                    verify=False,
-                )
-            except requests.RequestException as exc:
-                progress(f"brute-force request failed: {exc}")
-                time.sleep(delay)
-                continue
-            length = len(resp.content or b"")
-            if baseline is None:
-                baseline = length
-            if abs(length - baseline) > 500 or resp.status_code in (301, 302, 303):
-                findings.append({
-                    "type": "weak_credentials",
-                    "severity": "critical",
-                    "title": f"Possible valid credentials: {user}:{pwd}",
-                    "evidence": f"HTTP {resp.status_code}, length delta {length - baseline}",
-                    "description": "Server response differs notably from the baseline failed login.",
-                    "reference": "https://owasp.org/www-community/attacks/Brute_force_attack",
-                    "url": login_url,
-                })
-                progress(f"candidate credentials {user}:{pwd}")
-            time.sleep(delay)
-    return findings
+def _build_endpoints_from_recon(recon_result: Optional[Dict], base_url: str) -> Dict:
+    """Build the endpoint bag used by the exploit module."""
+    urls: List[str] = [base_url]
+    forms: List[Dict] = []
+    params: List[Dict] = []
+    if recon_result:
+        forms = list(recon_result.get("forms") or [])
+        for p in recon_result.get("url_params") or []:
+            params.append({"url": p["url"], "param": p["param"], "sample": ""})
+    return {"urls": urls, "forms": forms, "params": params}
 
 
 def run_vuln(
     *,
     target: str,
+    ctx: HttpContext,
     recon_result: Optional[Dict] = None,
     scan_result: Optional[Dict] = None,
-    timeout: int = 6,
-    delay: float = 0.0,
+    crawl_result: Optional[Dict] = None,
+    enabled_exploits: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict:
     progress = on_progress or (lambda m: log.info(m))
@@ -202,17 +158,15 @@ def run_vuln(
             if port_info.get("open") and port_info.get("headers") and not headers:
                 headers = port_info["headers"]
 
-    if not recon_result and not scan_result:
-        resp = network.safe_get(base_url, timeout=timeout, retries=1, verify=False)
-        if resp is not None:
+    # Fetch the base URL once for HTML / headers / fallback technologies
+    resp = network.safe_get(base_url, ctx=ctx, retries=0)
+    if resp is not None:
+        if not headers:
             headers = dict(resp.headers)
-            html = resp.text or ""
+        html = resp.text or ""
+        if not technologies:
             technologies = parsers.detect_technologies(headers, html)
-            base_url = resp.url
-    else:
-        resp = network.safe_get(base_url, timeout=timeout, retries=0, verify=False)
-        if resp is not None:
-            html = resp.text or ""
+        base_url = resp.url
 
     progress(f"evaluating {len(technologies)} detected technologies for CVEs")
     findings.extend(cves_from_technologies(technologies))
@@ -221,11 +175,21 @@ def run_vuln(
     findings.extend(check_security_headers(headers))
 
     progress("checking exposed sensitive files")
-    findings.extend(check_exposed_files(base_url, timeout=timeout, delay=delay,
-                                         on_progress=progress))
+    findings.extend(check_exposed_files(base_url, ctx, on_progress=progress))
 
     progress("scanning HTML for sensitive comments")
     findings.extend(check_html_findings(html))
+
+    # Active exploitation
+    endpoints = crawl_result or _build_endpoints_from_recon(recon_result, base_url)
+    progress(
+        f"active exploits: {len(endpoints.get('params', []))} params, "
+        f"{len(endpoints.get('forms', []))} forms, {len(endpoints.get('urls', []))} urls"
+    )
+    findings.extend(exploits_mod.run_exploits(
+        base_url=base_url, endpoints=endpoints, ctx=ctx,
+        on_progress=progress, enabled=enabled_exploits,
+    ))
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "unknown": 0}
     for f in findings:
@@ -238,4 +202,9 @@ def run_vuln(
         "technologies_evaluated": technologies,
         "findings": findings,
         "counts": counts,
+        "endpoints_tested": {
+            "url_count": len(endpoints.get("urls", [])),
+            "form_count": len(endpoints.get("forms", [])),
+            "param_count": len(endpoints.get("params", [])),
+        },
     }

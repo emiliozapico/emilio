@@ -284,6 +284,18 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState(null);
 
+  // Advanced
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [cookieStr, setCookieStr] = useState("");
+  const [headerStr, setHeaderStr] = useState("");
+  const [crawlDepth, setCrawlDepth] = useState(2);
+  const [crawlMaxPages, setCrawlMaxPages] = useState(30);
+  const [loginUrl, setLoginUrl] = useState("");
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [exploitsList, setExploitsList] = useState([]); // empty = all
+  const [allExploits, setAllExploits] = useState([]);
+
   // Load scan history
   const loadHistory = async () => {
     try {
@@ -295,6 +307,7 @@ export default function App() {
   useEffect(() => {
     loadHistory();
     const i = setInterval(loadHistory, 4000);
+    axios.get(`${API}/exploits`).then(r => setAllExploits(r.data?.available || [])).catch(() => {});
     return () => clearInterval(i);
   }, []); // eslint-disable-line
 
@@ -340,11 +353,37 @@ export default function App() {
         timeout: Number(timeout_) || 10,
         delay: Number(delay) || 0,
         with_whois: withWhois,
+        crawl_depth: Number(crawlDepth) || 2,
+        crawl_max_pages: Number(crawlMaxPages) || 30,
         i_have_authorization: true,
       };
       const portList = ports
         .split(",").map((p) => parseInt(p.trim(), 10)).filter((n) => !isNaN(n));
       if (portList.length) payload.ports = portList;
+
+      // cookies "a=b; c=d"
+      const cookies = {};
+      cookieStr.split(";").forEach(p => {
+        const i = p.indexOf("=");
+        if (i > 0) cookies[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+      });
+      if (Object.keys(cookies).length) payload.cookies = cookies;
+
+      // headers, one per line, "Name: value"
+      const headers = {};
+      headerStr.split("\n").forEach(line => {
+        const i = line.indexOf(":");
+        if (i > 0) headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+      });
+      if (Object.keys(headers).length) payload.headers = headers;
+
+      if (loginUrl && loginUser && loginPassword) {
+        payload.login_url = loginUrl;
+        payload.login_user = loginUser;
+        payload.login_password = loginPassword;
+      }
+      if (exploitsList.length) payload.enabled_exploits = exploitsList;
+
       const r = await axios.post(`${API}/scans`, payload);
       setActiveId(r.data.id);
       setTab("console");
@@ -376,7 +415,7 @@ export default function App() {
           <div className="brand-mark">BB</div>
           <div>
             <div className="brand-title">
-              bug-bounty-toolkit <span className="dim">// v1.0</span>
+              bug-bounty-toolkit <span className="dim">// v1.1</span>
             </div>
             <div className="mono" style={{ fontSize: 11, color: "var(--fg-mute)", letterSpacing: "0.08em" }}>
               {headerStatus}
@@ -439,6 +478,93 @@ export default function App() {
                      data-testid="input-whois" />
               run WHOIS lookup
             </label>
+
+            <button
+              type="button"
+              className="pill"
+              style={{ width: "100%", padding: "10px", marginBottom: 12 }}
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              data-testid="btn-toggle-advanced"
+            >
+              {showAdvanced ? "▾ hide" : "▸ show"} advanced (session, exploits, crawl)
+            </button>
+
+            {showAdvanced && (
+              <div data-testid="advanced-panel" style={{ marginBottom: 8 }}>
+                <div className="row">
+                  <div className="field">
+                    <label>crawl depth</label>
+                    <input type="number" min="0" max="5" value={crawlDepth}
+                           onChange={(e) => setCrawlDepth(e.target.value)}
+                           data-testid="input-crawl-depth" />
+                  </div>
+                  <div className="field">
+                    <label>crawl max pages</label>
+                    <input type="number" min="1" max="200" value={crawlMaxPages}
+                           onChange={(e) => setCrawlMaxPages(e.target.value)}
+                           data-testid="input-crawl-pages" />
+                  </div>
+                </div>
+
+                <div className="field">
+                  <label>cookies (name=val; name2=val2)</label>
+                  <input type="text" value={cookieStr}
+                         onChange={(e) => setCookieStr(e.target.value)}
+                         placeholder="PHPSESSID=abc; security=low"
+                         data-testid="input-cookies" />
+                </div>
+
+                <div className="field">
+                  <label>custom headers (one per line, Name: value)</label>
+                  <textarea rows={2} value={headerStr}
+                            onChange={(e) => setHeaderStr(e.target.value)}
+                            placeholder="X-API-Key: 123"
+                            data-testid="input-headers" />
+                </div>
+
+                <div className="field">
+                  <label>login url (optional auto-login)</label>
+                  <input type="text" value={loginUrl}
+                         onChange={(e) => setLoginUrl(e.target.value)}
+                         placeholder="http://target/login.php"
+                         data-testid="input-login-url" />
+                </div>
+                <div className="row">
+                  <div className="field">
+                    <label>login user</label>
+                    <input type="text" value={loginUser}
+                           onChange={(e) => setLoginUser(e.target.value)}
+                           data-testid="input-login-user" />
+                  </div>
+                  <div className="field">
+                    <label>login password</label>
+                    <input type="text" value={loginPassword}
+                           onChange={(e) => setLoginPassword(e.target.value)}
+                           data-testid="input-login-password" />
+                  </div>
+                </div>
+
+                {allExploits.length > 0 && (
+                  <div className="field">
+                    <label>active exploits (empty = all)</label>
+                    <div className="module-pills" data-testid="exploit-pills">
+                      {allExploits.map(ex => (
+                        <button
+                          key={ex} type="button"
+                          className={`pill ${exploitsList.includes(ex) ? "active" : ""}`}
+                          onClick={() => setExploitsList(
+                            exploitsList.includes(ex)
+                              ? exploitsList.filter(x => x !== ex)
+                              : [...exploitsList, ex]
+                          )}
+                          data-testid={`exploit-pill-${ex}`}
+                        >{ex}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <label className="checkbox-row">
               <input type="checkbox" checked={auth}

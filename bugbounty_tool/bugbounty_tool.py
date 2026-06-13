@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Command-line entry point for the bug-bounty toolkit.
-
-Examples
---------
-    python bugbounty_tool.py recon -t example.com -o report.txt
-    python bugbounty_tool.py all   -t example.com -v --output-format json --output report.json
-    python bugbounty_tool.py scan  -t 192.168.1.10 --ports 80,443,8080 --delay 5
-"""
+"""Command-line entry point for the bug-bounty toolkit."""
 from __future__ import annotations
 
 import argparse
@@ -14,18 +7,19 @@ import os
 import sys
 from typing import List, Optional
 
-# Allow running as a standalone script: `python bugbounty_tool.py ...`
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bugbounty_tool.core import run_pipeline  # noqa: E402
 from bugbounty_tool.modules import report as report_mod  # noqa: E402
+from bugbounty_tool.modules.exploits import ALL_EXPLOITS  # noqa: E402
 from bugbounty_tool.utils import helpers  # noqa: E402
+from bugbounty_tool.utils.session import parse_cookie_string, parse_header_list  # noqa: E402
 
 try:
     import yaml  # noqa: F401
     HAS_YAML = True
-except ImportError:  # pragma: no cover - yaml is a soft dependency
+except ImportError:
     HAS_YAML = False
 
 
@@ -49,8 +43,7 @@ def _load_config(path: Optional[str]) -> dict:
         raise SystemExit("PyYAML is required to use --config")
     import yaml as _yaml
     with open(path, "r", encoding="utf-8") as fh:
-        data = _yaml.safe_load(fh)
-    return data or {}
+        return _yaml.safe_load(fh) or {}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,43 +63,67 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("-t", "--target", required=True,
                        help="Target domain or IP (e.g. example.com).")
         p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
-        p.add_argument("--timeout", type=int, default=10, help="Network timeout in seconds.")
-        p.add_argument("--delay", type=float, default=0.0,
-                       help="Delay between requests in seconds.")
-        p.add_argument("--config", help="YAML config file with default values.")
+        p.add_argument("--timeout", type=int, default=10, help="Network timeout (s).")
+        p.add_argument("--delay", type=float, default=0.0, help="Delay between requests (s).")
+        p.add_argument("--config", help="YAML config file.")
         p.add_argument("-o", "--output", help="Write the report to this file.")
         p.add_argument("--output-format", choices=["txt", "json", "md"], default="txt",
                        help="Report format (default: txt).")
         p.add_argument(
             "--i-have-authorization",
             action="store_true",
-            help="Required confirmation that you have explicit written "
-                 "authorization to test the target.",
+            help="Required: confirm you have explicit written authorization to test the target.",
         )
+        # Session / auth
+        p.add_argument("--cookie", action="append", default=[],
+                       help="Add a cookie (name=value). Repeat to set multiple.")
+        p.add_argument("--cookies",
+                       help="Raw cookie string 'a=b; c=d' (overrides --cookie if both used).")
+        p.add_argument("-H", "--header", action="append", default=[],
+                       help="Custom header 'Name: value'. Repeat for multiple.")
+        p.add_argument("--login-url", help="URL of a login form to populate session cookies.")
+        p.add_argument("--login-user", help="Username for --login-url.")
+        p.add_argument("--login-password", help="Password for --login-url.")
+        p.add_argument("--login-user-field", default="username")
+        p.add_argument("--login-password-field", default="password")
 
     p_recon = sub.add_parser("recon", help="Reconnaissance only")
     _common(p_recon)
-    p_recon.add_argument("--subdomain-wordlist", help="Custom subdomain wordlist file.")
-    p_recon.add_argument("--dir-wordlist", help="Custom directory wordlist file.")
-    p_recon.add_argument("--no-whois", action="store_true", help="Skip WHOIS lookup.")
+    p_recon.add_argument("--subdomain-wordlist")
+    p_recon.add_argument("--dir-wordlist")
+    p_recon.add_argument("--no-whois", action="store_true")
 
     p_scan = sub.add_parser("scan", help="Port + version scan only")
     _common(p_scan)
-    p_scan.add_argument("--ports", help="Comma-separated port list (default 80,443,8080,8443,8000,3000,5000)")
+    p_scan.add_argument("--ports", help="Comma-separated port list.")
 
-    p_vuln = sub.add_parser("vuln", help="Vulnerability heuristics only")
+    p_vuln = sub.add_parser("vuln", help="Vulnerability scan (passive + active exploits)")
     _common(p_vuln)
+    p_vuln.add_argument("--crawl-depth", type=int, default=2)
+    p_vuln.add_argument("--crawl-max-pages", type=int, default=30)
+    p_vuln.add_argument("--exploits",
+                        help=f"Comma-separated exploits to enable. Choices: {','.join(ALL_EXPLOITS)} "
+                             "(default: all)")
 
     p_all = sub.add_parser("all", help="Run every module (recon -> scan -> vuln)")
     _common(p_all)
-    p_all.add_argument("--subdomain-wordlist", help="Custom subdomain wordlist file.")
-    p_all.add_argument("--dir-wordlist", help="Custom directory wordlist file.")
-    p_all.add_argument("--no-whois", action="store_true", help="Skip WHOIS lookup.")
-    p_all.add_argument("--ports", help="Comma-separated port list.")
+    p_all.add_argument("--subdomain-wordlist")
+    p_all.add_argument("--dir-wordlist")
+    p_all.add_argument("--no-whois", action="store_true")
+    p_all.add_argument("--ports")
+    p_all.add_argument("--crawl-depth", type=int, default=2)
+    p_all.add_argument("--crawl-max-pages", type=int, default=30)
+    p_all.add_argument("--exploits")
     p_all.add_argument("-s", "--silent-banner", action="store_true",
                        help="Do not print the ascii banner.")
 
     return parser
+
+
+def _resolve_cookies(args) -> dict:
+    if getattr(args, "cookies", None):
+        return parse_cookie_string(args.cookies)
+    return parse_cookie_string("; ".join(args.cookie or []))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -119,14 +136,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.i_have_authorization:
         print(
-            "\nERROR: refusing to run without --i-have-authorization.\n"
-            "       Re-run with the flag once you confirm written consent.",
+            "\nERROR: refusing to run without --i-have-authorization.",
             file=sys.stderr,
         )
         return 2
 
     log = helpers.get_logger(verbose=args.verbose)
-
     cfg = _load_config(args.config)
 
     modules = ["recon", "scan", "vuln"] if args.module == "all" else [args.module]
@@ -136,7 +151,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ports = _parse_ports(getattr(args, "ports", None)) or cfg.get("ports")
     with_whois = not getattr(args, "no_whois", False)
 
-    log.info(f"target={args.target} modules={modules}")
+    exploits = None
+    raw_ex = getattr(args, "exploits", None)
+    if raw_ex:
+        exploits = [e.strip() for e in raw_ex.split(",") if e.strip()]
+
+    cookies = _resolve_cookies(args)
+    headers = parse_header_list(args.header)
+
+    log.info(f"target={args.target} modules={modules} cookies={list(cookies)} headers={list(headers)}")
 
     try:
         result = run_pipeline(
@@ -148,6 +171,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             subdomain_wordlist=subdomain_wl,
             dir_wordlist=dir_wl,
             with_whois=with_whois,
+            cookies=cookies,
+            headers=headers,
+            crawl_depth=getattr(args, "crawl_depth", 2),
+            crawl_max_pages=getattr(args, "crawl_max_pages", 30),
+            enabled_exploits=exploits,
+            login_url=getattr(args, "login_url", None),
+            login_user=getattr(args, "login_user", None),
+            login_password=getattr(args, "login_password", None),
+            login_user_field=getattr(args, "login_user_field", "username"),
+            login_password_field=getattr(args, "login_password_field", "password"),
             on_progress=log.info,
         )
     except KeyboardInterrupt:
@@ -155,14 +188,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 130
 
     rendered = report_mod.render(result, args.output_format)
-
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:
             fh.write(rendered)
         log.info(f"report written to {args.output}")
     else:
         print(rendered)
-
     return 0
 
 

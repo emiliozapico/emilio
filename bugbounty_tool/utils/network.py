@@ -1,7 +1,8 @@
 """Network helpers shared across modules.
 
-All HTTP traffic in this tool goes through :func:`safe_get` so we have a single
-place to configure timeouts, retries, User-Agent, and inter-request delays.
+All HTTP traffic goes through :func:`safe_request` so we have a single
+place to configure timeouts, retries, User-Agent, cookies, headers and
+inter-request delays.
 """
 from __future__ import annotations
 
@@ -12,56 +13,69 @@ from urllib.parse import urlparse
 
 import requests
 
-DEFAULT_UA = (
-    "BugBountyToolkit/1.0 (+authorized-testing-only; "
-    "https://github.com/example/bugbounty-toolkit)"
-)
+from .session import HttpContext, DEFAULT_UA  # re-export for backward compat
 
 
-def safe_get(
+def safe_request(
     url: str,
-    timeout: int = 10,
-    retries: int = 2,
+    method: str = "GET",
+    *,
+    ctx: Optional[HttpContext] = None,
+    timeout: Optional[int] = None,
+    retries: int = 1,
     delay: float = 0.0,
     headers: Optional[dict] = None,
+    cookies: Optional[dict] = None,
+    data=None,
+    params=None,
     allow_redirects: bool = True,
-    verify: bool = True,
+    verify: Optional[bool] = None,
 ) -> Optional[requests.Response]:
-    """Issue an HTTP GET with retries and a polite default User-Agent.
-
-    Returns the :class:`requests.Response` on success or ``None`` if every
-    attempt failed. Never raises.
-    """
-    final_headers = {"User-Agent": DEFAULT_UA}
+    """Issue an HTTP request with retries. Returns ``None`` on total failure."""
+    final_headers = {"User-Agent": (ctx.user_agent if ctx else DEFAULT_UA)}
+    if ctx and ctx.headers:
+        final_headers.update(ctx.headers)
     if headers:
         final_headers.update(headers)
+    final_cookies = dict(ctx.cookies) if ctx and ctx.cookies else {}
+    if cookies:
+        final_cookies.update(cookies)
+    final_timeout = timeout if timeout is not None else (ctx.timeout if ctx else 10)
+    final_verify = verify if verify is not None else (ctx.verify_tls if ctx else False)
+    final_delay = max(delay, ctx.delay if ctx else 0.0)
 
     last_exc: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:
-            response = requests.get(
+            response = requests.request(
+                method.upper(),
                 url,
-                timeout=timeout,
+                timeout=final_timeout,
                 headers=final_headers,
+                cookies=final_cookies or None,
+                data=data,
+                params=params,
                 allow_redirects=allow_redirects,
-                verify=verify,
+                verify=final_verify,
             )
-            if delay > 0:
-                time.sleep(delay)
+            if final_delay > 0:
+                time.sleep(final_delay)
             return response
         except requests.RequestException as exc:
             last_exc = exc
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 5))
                 continue
-    if last_exc is not None:
-        # Swallow but expose via attribute on None? Simpler: just return None.
-        pass
+    _ = last_exc  # silenced for type-checkers
     return None
 
 
+def safe_get(url: str, **kwargs) -> Optional[requests.Response]:
+    """Backwards-compatible shortcut for GET."""
+    return safe_request(url, method="GET", **kwargs)
+
+
 def resolve_host(host: str) -> Optional[str]:
-    """Resolve a hostname to a single IPv4 address, ``None`` on failure."""
     try:
         return socket.gethostbyname(host)
     except (socket.gaierror, OSError):
@@ -69,7 +83,6 @@ def resolve_host(host: str) -> Optional[str]:
 
 
 def tcp_connect(host: str, port: int, timeout: float = 2.0) -> bool:
-    """Return ``True`` if a TCP connection to ``host:port`` succeeds."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -78,7 +91,6 @@ def tcp_connect(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 def normalize_target(target: str) -> str:
-    """Return a bare hostname (strip scheme, path, port)."""
     if "://" in target:
         parsed = urlparse(target)
         target = parsed.hostname or target
@@ -86,7 +98,6 @@ def normalize_target(target: str) -> str:
 
 
 def build_base_url(host: str, port: int) -> str:
-    """Build an http(s) base URL given a host and a known web port."""
     if port in (443, 8443):
         return f"https://{host}:{port}" if port != 443 else f"https://{host}"
     return f"http://{host}:{port}" if port != 80 else f"http://{host}"
