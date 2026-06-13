@@ -38,6 +38,7 @@ class ReplayRequest(BaseModel):
     follow_redirects: bool = False
     verify_tls: bool = False
     timeout: int = 10
+    i_have_authorization: bool = False
 
 
 class ScanRequest(BaseModel):
@@ -253,10 +254,32 @@ def build_router(db: AsyncIOMotorDatabase) -> APIRouter:
         """Burp-style replay: re-send an editable HTTP request and return the raw response."""
         import requests as _req
         from urllib.parse import urlparse as _up
-        # Safety net: block obviously private RFC-style hostnames unless the caller
-        # explicitly opted-in via header? Skip for now — same trust model as the scanner.
         if not payload.url or not payload.url.startswith(("http://", "https://")):
             raise HTTPException(status_code=400, detail="url must start with http(s)://")
+
+        # SSRF guard: only allow if (a) caller asserts authorization explicitly OR
+        # (b) the host appears in a scan we have already run.
+        parsed = _up(payload.url)
+        host = parsed.hostname or ""
+        if not payload.i_have_authorization:
+            known = False
+            # Check in-memory jobs first
+            with _JOBS_LOCK:
+                for j in JOBS.values():
+                    if host and host in (j.get("target") or ""):
+                        known = True; break
+            if not known:
+                # Check persisted scans
+                doc = await db.bb_scans.find_one({"target": {"$regex": host}}, {"_id": 1})
+                known = bool(doc)
+            if not known:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"host '{host}' has not been scanned by this toolkit. "
+                           "Either run a scan against it first, or set "
+                           "'i_have_authorization' to true to confirm consent."
+                )
+
         try:
             import time
             t0 = time.perf_counter()

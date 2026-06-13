@@ -285,6 +285,7 @@ function ReplayView({ initialUrl, initialCurl }) {
         cookies: Object.keys(cookies).length ? cookies : undefined,
         body: body || undefined,
         follow_redirects: followRedirects,
+        i_have_authorization: true,
       });
       setResponse(r.data);
     } catch (e) {

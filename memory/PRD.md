@@ -96,7 +96,16 @@ exploitation: SQLi, XSS, LFI, command injection, etc.
   persistence to synchronous pymongo.
 * Fixed `normalize_target` stripping `:port`. New `host_only()` + `host_port()`
   helpers. `run_scan` now auto-uses explicit port when given `host:port`.
-* All 21 backend tests pass (10 v1.0 + 6 v1.1 + 5 v1.2 regression).
+* All 21 backend tests pass.
+
+### v1.3 (2026-06-13) — CVSS + Replay
+* **CVSS 3.1 enrichment**: every finding now has `cvss: {score, vector, severity}` based on a curated table of 22 finding types. Severity is auto-upgraded if CVSS bucket is higher.
+* **Curl reproducer**: every finding with a `url` carries a `curl -i -k ...` string copy-pasteable into a terminal. Includes session cookies and custom headers.
+* **Burp-style Replay**: new `POST /api/bb/replay` endpoint accepts `{method, url, headers, cookies, body, follow_redirects, verify_tls, timeout}` and returns the raw response (status, headers, body, timing).
+* **SSRF guard** on `/api/bb/replay`: rejects (HTTP 403) URLs whose host has never been scanned, unless `i_have_authorization: true` is set.
+* UI: new **Replay tab** with full request editor (method dropdown, URL, headers/cookies textareas, body, follow-redirects checkbox), live response viewer.
+* UI: each Vuln finding card now shows a **CVSS badge**, the full vector, the curl reproducer, and **"Replay in console"** / **"Copy curl"** buttons.
+* Reports (txt + md) now include CVSS score+vector and a ```bash code-fenced curl reproducer per finding.
 
 ## Test results
 
@@ -105,6 +114,7 @@ exploitation: SQLi, XSS, LFI, command injection, etc.
 | 1 (v1.0)  | 13/13 | All pass |
 | 2 (v1.1)  | 14/16 | 2 critical bugs caught (motor loop, port stripping) |
 | 3 (v1.2)  | 21/21 | Fully green — both v1.1 bugs fixed |
+| 4 (v1.3)  | 27/27 | CVSS + Replay green |
 
 Local vulnserver self-test: **25 findings** (3 critical, 6 high, 7 medium,
 8 low, 1 info) including `sqli_error`, `xss_reflected`, `command_injection`,
